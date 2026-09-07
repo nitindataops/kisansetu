@@ -41,7 +41,128 @@ function getAiClient(): GoogleGenAI | null {
   }
   return aiClient;
 }
+function getGeminiStatus(err: unknown): number | undefined {
+  const e = err as any;
 
+  if (typeof e?.status === 'number') return e.status;
+  if (typeof e?.error?.code === 'number') return e.error.code;
+
+  const message = String(e?.message ?? '');
+  const match = message.match(/"code":\s*(\d+)/);
+
+  return match ? Number(match[1]) : undefined;
+}
+
+function isTransientGeminiError(err: unknown): boolean {
+  const status = getGeminiStatus(err);
+
+  return status === 408 ||
+    status === 429 ||
+    status === 500 ||
+    status === 503;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRunDiagnostic(text: string): boolean {
+  const q = text.toLowerCase();
+
+  const keywords = [
+    'mandi', 'भाव', 'bhav', 'bhaav',
+    'price', 'rate', 'daam', 'कीमत',
+    'listing', 'crop', 'फसल', 'fasal',
+    'marketplace', 'खरीद', 'बेच', 'bech',
+    'kharid', 'order', 'ऑर्डर',
+    'payment', 'पेमेंट', 'paisa',
+    'account', 'खाता', 'delivery', 'डिलीवरी',
+    'tracking', 'track', 'ticket',
+    'support', 'help', 'profile',
+    'प्रोफाइल', 'navigate', 'कैसे',
+    'kaise', 'kahan', 'कहाँ'
+  ];
+
+  return keywords.some((keyword) => q.includes(keyword));
+}
+
+async function generateGeminiContent(
+  ai: GoogleGenAI,
+  params: {
+    model: string;
+    contents: any;
+    config?: any;
+  }
+): Promise<{ response: any; modelUsed: string }> {
+  const models = [
+    params.model,
+    'gemini-3.6-flash',
+  ];
+
+  let lastError: unknown;
+
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+
+    try {
+      console.log(`[KisanSetu AI] Calling Gemini model: ${model}`);
+
+      const response = await ai.models.generateContent({
+        ...params,
+        model,
+      });
+
+      console.log(`[KisanSetu AI] Gemini success: ${model}`);
+
+      return {
+        response,
+        modelUsed: model,
+      };
+    } catch (err) {
+      lastError = err;
+
+      console.error(
+        `[KisanSetu AI] Gemini ${model} failed. Status: ${getGeminiStatus(err)}`
+      );
+
+      if (!isTransientGeminiError(err)) {
+        throw err;
+      }
+
+      if (i === 0) {
+        console.log(
+          `[KisanSetu AI] Retrying ${model} once...`
+        );
+
+        await sleep(1000);
+
+        try {
+          const retryResponse = await ai.models.generateContent({
+            ...params,
+            model,
+          });
+
+          console.log(
+            `[KisanSetu AI] Gemini retry success: ${model}`
+          );
+
+          return {
+            response: retryResponse,
+            modelUsed: model,
+          };
+        } catch (retryErr) {
+          lastError = retryErr;
+
+          console.error(
+            `[KisanSetu AI] Retry failed. Moving to fallback model.`
+          );
+        }
+      }
+    }
+  }
+
+  throw lastError ?? new Error('Gemini request failed');
+}
 // ==========================================
 // SYSTEM STATE KNOWLEDGE & SAFE TOOLS
 // ==========================================
@@ -665,7 +786,13 @@ export async function processAiSupportChat(params: {
   }
 
   // 5. Run real issue diagnostic check
-  const diagnostic = await executeSupportDiagnostic(sanitized, context);
+  const diagnostic = shouldRunDiagnostic(sanitized)
+    ? await executeSupportDiagnostic(sanitized, context)
+    : {
+      diagnosed: false,
+      explanation: '',
+      suggestedActions: [],
+    };
 
   // 6. Try calling Gemini AI for intelligent contextual synthesis
   const ai = getAiClient();
@@ -780,14 +907,17 @@ ${diagnostic.explanation}
         `[KisanSetu AI] Calling Gemini model: ${modelName}`
       );
 
-      const response = await ai.models.generateContent({
+      const { response, modelUsed } = await generateGeminiContent(ai, {
         model: modelName,
         contents: contents as any,
         config: {
           systemInstruction,
-          temperature: 0.2,
         },
       });
+
+      console.log(
+        `[KisanSetu AI] Response generated using: ${modelUsed}`
+      );
 
       const responseText = response.text?.trim() || '';
 
@@ -812,280 +942,280 @@ ${diagnostic.explanation}
   }
 
   // 7. Friendly fallback if Gemini is unavailable
-let fallbackText = diagnostic.explanation;
+  let fallbackText = diagnostic.explanation;
 
-if (!diagnostic.diagnosed) {
-  if (isHi) {
-    fallbackText =
-      'माफ़ कीजिए, अभी AI सहायता सेवा उपलब्ध नहीं है। कृपया थोड़ी देर बाद दोबारा प्रयास करें या सपोर्ट टिकट बनाएं।';
-  } else if (isHinglish) {
-    fallbackText =
-      'Sorry, abhi AI support service available nahi hai. Kripya thodi der baad dobara try karein ya support ticket banayein.';
-  } else {
-    fallbackText =
-      'Sorry, the AI support service is temporarily unavailable. Please try again later or create a support ticket.';
-  }
-}
-
-return {
-  replyText: fallbackText,
-  suggestedActions: diagnostic.suggestedActions,
-  needsResolutionConfirmation: diagnostic.diagnosed,
-  isAiFallback: !ai,
-};
-}
-
-  // ==========================================
-  // TICKET MANAGEMENT API FUNCTIONS
-  // ==========================================
-
-  export function listSupportTickets(filter?: {
-    userId?: string;
-    role?: string;
-    status?: string;
-    channel?: string;
-    category?: string;
-  }): SupportTicket[] {
-    let list = [...ticketsDatabase];
-
-    if (filter?.userId) {
-      list = list.filter((t) => t.userId === filter.userId);
-    }
-    if (filter?.status && filter.status !== 'ALL') {
-      list = list.filter((t) => t.status === filter.status);
-    }
-    if (filter?.channel && filter.channel !== 'ALL') {
-      list = list.filter((t) => t.channel === filter.channel);
-    }
-    if (filter?.category && filter.category !== 'ALL') {
-      list = list.filter((t) => t.category === filter.category);
-    }
-
-    // Sort newest first
-    return list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  }
-
-  export function getSupportTicketById(ticketId: string): SupportTicket | undefined {
-    return ticketsDatabase.find((t) => t.ticketId === ticketId);
-  }
-
-  export function createSupportTicket(params: {
-    userId: string;
-    userName: string;
-    userRole: 'farmer' | 'buyer' | 'guest';
-    userPhone?: string;
-    userEmail?: string;
-    channel: SupportChannel;
-    category: TicketCategory;
-    subject: string;
-    description: string;
-    conversationSummary?: string;
-    priority?: TicketPriority;
-    status?: TicketStatus;
-    initialMessage?: string;
-    language?: 'hi-IN' | 'en-IN' | 'hinglish' | string;
-  }): SupportTicket {
-    const detectedLang = params.language || (params.initialMessage ? (detectQueryLanguage(params.initialMessage) === 'hi' ? 'hi-IN' : detectQueryLanguage(params.initialMessage) === 'hinglish' ? 'hinglish' : 'en-IN') : 'hi-IN');
-    const newTicket: SupportTicket = {
-      ticketId: generateTicketId(),
-      userId: params.userId || 'guest_user',
-      userName: params.userName || 'KisanSetu User',
-      userRole: params.userRole || 'farmer',
-      userPhone: params.userPhone,
-      userEmail: params.userEmail,
-      channel: params.channel || 'WEB_CHAT',
-      category: params.category || 'GENERAL',
-      language: detectedLang,
-      subject: params.subject || 'Assistance Request',
-      description: params.description || '',
-      conversationSummary: params.conversationSummary || params.description || 'Support interaction initiated.',
-      priority: params.priority || 'MEDIUM',
-      status: params.status || 'OPEN',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      assignedTo: params.status === 'ESCALATED' ? 'Farmer Advisory & Tech Support' : 'AI Assistant',
-      messages: params.initialMessage
-        ? [
-          {
-            id: `msg_${Date.now()}`,
-            sender: 'user',
-            senderName: params.userName,
-            text: params.initialMessage,
-            timestamp: new Date().toISOString(),
-          },
-        ]
-        : [],
-      diagnosticSummary: {
-        userProblem: params.subject,
-        aiAction: 'Initialized ticket workflow.',
-        result: `Ticket registered with language preference (${detectedLang}).`,
-        aiAttempts: ['1. Captured inquiry details', '2. Logged diagnostic parameters'],
-        currentStatus: params.status || 'OPEN',
-      },
-    };
-
-    ticketsDatabase.unshift(newTicket);
-    return newTicket;
-  }
-
-  export function updateSupportTicket(
-    ticketId: string,
-    updates: Partial<SupportTicket>
-  ): SupportTicket | null {
-    const index = ticketsDatabase.findIndex((t) => t.ticketId === ticketId);
-    if (index === -1) return null;
-
-    const current = ticketsDatabase[index];
-    const updated: SupportTicket = {
-      ...current,
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    };
-
-    ticketsDatabase[index] = updated;
-    return updated;
-  }
-
-  export function addMessageToTicket(
-    ticketId: string,
-    message: {
-      sender: 'user' | 'ai' | 'agent' | 'system';
-      senderName?: string;
-      text: string;
-    }
-  ): SupportTicket | null {
-    const ticket = getSupportTicketById(ticketId);
-    if (!ticket) return null;
-
-    const newMsg: SupportMessage = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      sender: message.sender,
-      senderName: message.senderName,
-      text: sanitizeInput(message.text),
-      timestamp: new Date().toISOString(),
-    };
-
-    ticket.messages.push(newMsg);
-    ticket.updatedAt = new Date().toISOString();
-
-    if (message.sender === 'agent') {
-      ticket.status = 'IN_REVIEW';
-      ticket.assignedTo = message.senderName || 'Senior Support Specialist';
-    }
-
-    return ticket;
-  }
-
-  export function submitTicketFeedback(
-    ticketId: string,
-    feedback: {
-      rating?: number;
-      resolved: 'yes' | 'partial' | 'no';
-      feedback?: string;
-    }
-  ): SupportTicket | null {
-    const ticket = getSupportTicketById(ticketId);
-    if (!ticket) return null;
-
-    ticket.satisfaction = {
-      rating: feedback.rating,
-      resolved: feedback.resolved,
-      feedback: feedback.feedback ? sanitizeInput(feedback.feedback) : undefined,
-      submittedAt: new Date().toISOString(),
-    };
-
-    if (feedback.resolved === 'yes') {
-      ticket.status = 'RESOLVED';
-      ticket.resolution = {
-        text: 'User confirmed problem resolution via feedback.',
-        resolvedAt: new Date().toISOString(),
-        resolvedBy: 'Customer Confirmation',
-        autoResolved: false,
-      };
-    }
-
-    ticket.updatedAt = new Date().toISOString();
-    return ticket;
-  }
-
-  // ==========================================
-  // EMAIL SUPPORT INGESTION & AUTO-REPLY
-  // ==========================================
-
-  export async function processIncomingEmailSupport(emailData: {
-    fromEmail: string;
-    fromName?: string;
-    subject: string;
-    body: string;
-  }): Promise<{
-    ticketId: string;
-    isExistingTicket: boolean;
-    replySubject: string;
-    replyBody: string;
-  }> {
-    const sanitizedSubject = sanitizeInput(emailData.subject);
-    const sanitizedBody = sanitizeInput(emailData.body);
-
-    // 1. Detect existing ticket ID in Subject or Body (e.g. KIS-SUP-1042)
-    const ticketMatch = (sanitizedSubject + ' ' + sanitizedBody).match(/KIS-SUP-\d{4,5}/i);
-    let existingTicket: SupportTicket | undefined;
-
-    if (ticketMatch) {
-      const matchedId = ticketMatch[0].toUpperCase();
-      existingTicket = getSupportTicketById(matchedId);
-    }
-
-    const isHi = /[\u0900-\u097F]/.test(sanitizedSubject + sanitizedBody) || sanitizedBody.includes('namaste') || sanitizedBody.includes('meri');
-
-    let ticketId: string;
-    let isExisting = false;
-
-    if (existingTicket) {
-      ticketId = existingTicket.ticketId;
-      isExisting = true;
-      addMessageToTicket(ticketId, {
-        sender: 'user',
-        senderName: emailData.fromName || emailData.fromEmail,
-        text: `[Incoming Email]: ${sanitizedBody}`,
-      });
+  if (!diagnostic.diagnosed) {
+    if (isHi) {
+      fallbackText =
+        'माफ़ कीजिए, अभी AI सहायता सेवा उपलब्ध नहीं है। कृपया थोड़ी देर बाद दोबारा प्रयास करें या सपोर्ट टिकट बनाएं।';
+    } else if (isHinglish) {
+      fallbackText =
+        'Sorry, abhi AI support service available nahi hai. Kripya thodi der baad dobara try karein ya support ticket banayein.';
     } else {
-      // Classify Category
-      let category: TicketCategory = 'GENERAL';
-      const lower = (sanitizedSubject + ' ' + sanitizedBody).toLowerCase();
-      if (lower.includes('photo') || lower.includes('image') || lower.includes('फोटो') || lower.includes('तस्वीर')) {
-        category = 'CROP_LISTING';
-      } else if (lower.includes('payment') || lower.includes('पैसा') || lower.includes('रुपये')) {
-        category = 'PAYMENT';
-      } else if (lower.includes('order') || lower.includes('delivery') || lower.includes('डिलीवरी')) {
-        category = 'ORDER_DELIVERY';
-      } else if (lower.includes('mandi') || lower.includes('भाव') || lower.includes('रेट')) {
-        category = 'MANDI_RATES';
-      }
+      fallbackText =
+        'Sorry, the AI support service is temporarily unavailable. Please try again later or create a support ticket.';
+    }
+  }
 
-      const newTicket = createSupportTicket({
-        userId: emailData.fromEmail,
-        userName: emailData.fromName || 'Valued Farmer / Buyer',
-        userRole: 'farmer',
-        userEmail: emailData.fromEmail,
-        channel: 'EMAIL',
-        category,
-        subject: sanitizedSubject || 'Email Support Inquiry',
-        description: sanitizedBody,
-        conversationSummary: `Incoming support email classified as ${category}.`,
-        priority: 'MEDIUM',
-        status: 'OPEN',
-        initialMessage: sanitizedBody,
-      });
-      ticketId = newTicket.ticketId;
+  return {
+    replyText: fallbackText,
+    suggestedActions: diagnostic.suggestedActions,
+    needsResolutionConfirmation: diagnostic.diagnosed,
+    isAiFallback: true,
+  };
+}
+
+// ==========================================
+// TICKET MANAGEMENT API FUNCTIONS
+// ==========================================
+
+export function listSupportTickets(filter?: {
+  userId?: string;
+  role?: string;
+  status?: string;
+  channel?: string;
+  category?: string;
+}): SupportTicket[] {
+  let list = [...ticketsDatabase];
+
+  if (filter?.userId) {
+    list = list.filter((t) => t.userId === filter.userId);
+  }
+  if (filter?.status && filter.status !== 'ALL') {
+    list = list.filter((t) => t.status === filter.status);
+  }
+  if (filter?.channel && filter.channel !== 'ALL') {
+    list = list.filter((t) => t.channel === filter.channel);
+  }
+  if (filter?.category && filter.category !== 'ALL') {
+    list = list.filter((t) => t.category === filter.category);
+  }
+
+  // Sort newest first
+  return list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+}
+
+export function getSupportTicketById(ticketId: string): SupportTicket | undefined {
+  return ticketsDatabase.find((t) => t.ticketId === ticketId);
+}
+
+export function createSupportTicket(params: {
+  userId: string;
+  userName: string;
+  userRole: 'farmer' | 'buyer' | 'guest';
+  userPhone?: string;
+  userEmail?: string;
+  channel: SupportChannel;
+  category: TicketCategory;
+  subject: string;
+  description: string;
+  conversationSummary?: string;
+  priority?: TicketPriority;
+  status?: TicketStatus;
+  initialMessage?: string;
+  language?: 'hi-IN' | 'en-IN' | 'hinglish' | string;
+}): SupportTicket {
+  const detectedLang = params.language || (params.initialMessage ? (detectQueryLanguage(params.initialMessage) === 'hi' ? 'hi-IN' : detectQueryLanguage(params.initialMessage) === 'hinglish' ? 'hinglish' : 'en-IN') : 'hi-IN');
+  const newTicket: SupportTicket = {
+    ticketId: generateTicketId(),
+    userId: params.userId || 'guest_user',
+    userName: params.userName || 'KisanSetu User',
+    userRole: params.userRole || 'farmer',
+    userPhone: params.userPhone,
+    userEmail: params.userEmail,
+    channel: params.channel || 'WEB_CHAT',
+    category: params.category || 'GENERAL',
+    language: detectedLang,
+    subject: params.subject || 'Assistance Request',
+    description: params.description || '',
+    conversationSummary: params.conversationSummary || params.description || 'Support interaction initiated.',
+    priority: params.priority || 'MEDIUM',
+    status: params.status || 'OPEN',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    assignedTo: params.status === 'ESCALATED' ? 'Farmer Advisory & Tech Support' : 'AI Assistant',
+    messages: params.initialMessage
+      ? [
+        {
+          id: `msg_${Date.now()}`,
+          sender: 'user',
+          senderName: params.userName,
+          text: params.initialMessage,
+          timestamp: new Date().toISOString(),
+        },
+      ]
+      : [],
+    diagnosticSummary: {
+      userProblem: params.subject,
+      aiAction: 'Initialized ticket workflow.',
+      result: `Ticket registered with language preference (${detectedLang}).`,
+      aiAttempts: ['1. Captured inquiry details', '2. Logged diagnostic parameters'],
+      currentStatus: params.status || 'OPEN',
+    },
+  };
+
+  ticketsDatabase.unshift(newTicket);
+  return newTicket;
+}
+
+export function updateSupportTicket(
+  ticketId: string,
+  updates: Partial<SupportTicket>
+): SupportTicket | null {
+  const index = ticketsDatabase.findIndex((t) => t.ticketId === ticketId);
+  if (index === -1) return null;
+
+  const current = ticketsDatabase[index];
+  const updated: SupportTicket = {
+    ...current,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  };
+
+  ticketsDatabase[index] = updated;
+  return updated;
+}
+
+export function addMessageToTicket(
+  ticketId: string,
+  message: {
+    sender: 'user' | 'ai' | 'agent' | 'system';
+    senderName?: string;
+    text: string;
+  }
+): SupportTicket | null {
+  const ticket = getSupportTicketById(ticketId);
+  if (!ticket) return null;
+
+  const newMsg: SupportMessage = {
+    id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    sender: message.sender,
+    senderName: message.senderName,
+    text: sanitizeInput(message.text),
+    timestamp: new Date().toISOString(),
+  };
+
+  ticket.messages.push(newMsg);
+  ticket.updatedAt = new Date().toISOString();
+
+  if (message.sender === 'agent') {
+    ticket.status = 'IN_REVIEW';
+    ticket.assignedTo = message.senderName || 'Senior Support Specialist';
+  }
+
+  return ticket;
+}
+
+export function submitTicketFeedback(
+  ticketId: string,
+  feedback: {
+    rating?: number;
+    resolved: 'yes' | 'partial' | 'no';
+    feedback?: string;
+  }
+): SupportTicket | null {
+  const ticket = getSupportTicketById(ticketId);
+  if (!ticket) return null;
+
+  ticket.satisfaction = {
+    rating: feedback.rating,
+    resolved: feedback.resolved,
+    feedback: feedback.feedback ? sanitizeInput(feedback.feedback) : undefined,
+    submittedAt: new Date().toISOString(),
+  };
+
+  if (feedback.resolved === 'yes') {
+    ticket.status = 'RESOLVED';
+    ticket.resolution = {
+      text: 'User confirmed problem resolution via feedback.',
+      resolvedAt: new Date().toISOString(),
+      resolvedBy: 'Customer Confirmation',
+      autoResolved: false,
+    };
+  }
+
+  ticket.updatedAt = new Date().toISOString();
+  return ticket;
+}
+
+// ==========================================
+// EMAIL SUPPORT INGESTION & AUTO-REPLY
+// ==========================================
+
+export async function processIncomingEmailSupport(emailData: {
+  fromEmail: string;
+  fromName?: string;
+  subject: string;
+  body: string;
+}): Promise<{
+  ticketId: string;
+  isExistingTicket: boolean;
+  replySubject: string;
+  replyBody: string;
+}> {
+  const sanitizedSubject = sanitizeInput(emailData.subject);
+  const sanitizedBody = sanitizeInput(emailData.body);
+
+  // 1. Detect existing ticket ID in Subject or Body (e.g. KIS-SUP-1042)
+  const ticketMatch = (sanitizedSubject + ' ' + sanitizedBody).match(/KIS-SUP-\d{4,5}/i);
+  let existingTicket: SupportTicket | undefined;
+
+  if (ticketMatch) {
+    const matchedId = ticketMatch[0].toUpperCase();
+    existingTicket = getSupportTicketById(matchedId);
+  }
+
+  const isHi = /[\u0900-\u097F]/.test(sanitizedSubject + sanitizedBody) || sanitizedBody.includes('namaste') || sanitizedBody.includes('meri');
+
+  let ticketId: string;
+  let isExisting = false;
+
+  if (existingTicket) {
+    ticketId = existingTicket.ticketId;
+    isExisting = true;
+    addMessageToTicket(ticketId, {
+      sender: 'user',
+      senderName: emailData.fromName || emailData.fromEmail,
+      text: `[Incoming Email]: ${sanitizedBody}`,
+    });
+  } else {
+    // Classify Category
+    let category: TicketCategory = 'GENERAL';
+    const lower = (sanitizedSubject + ' ' + sanitizedBody).toLowerCase();
+    if (lower.includes('photo') || lower.includes('image') || lower.includes('फोटो') || lower.includes('तस्वीर')) {
+      category = 'CROP_LISTING';
+    } else if (lower.includes('payment') || lower.includes('पैसा') || lower.includes('रुपये')) {
+      category = 'PAYMENT';
+    } else if (lower.includes('order') || lower.includes('delivery') || lower.includes('डिलीवरी')) {
+      category = 'ORDER_DELIVERY';
+    } else if (lower.includes('mandi') || lower.includes('भाव') || lower.includes('रेट')) {
+      category = 'MANDI_RATES';
     }
 
-    // Generate Contextual Email Response
-    const ai = getAiClient();
-    let generatedReply = '';
+    const newTicket = createSupportTicket({
+      userId: emailData.fromEmail,
+      userName: emailData.fromName || 'Valued Farmer / Buyer',
+      userRole: 'farmer',
+      userEmail: emailData.fromEmail,
+      channel: 'EMAIL',
+      category,
+      subject: sanitizedSubject || 'Email Support Inquiry',
+      description: sanitizedBody,
+      conversationSummary: `Incoming support email classified as ${category}.`,
+      priority: 'MEDIUM',
+      status: 'OPEN',
+      initialMessage: sanitizedBody,
+    });
+    ticketId = newTicket.ticketId;
+  }
 
-    if (ai) {
-      try {
-        const prompt = `
+  // Generate Contextual Email Response
+  const ai = getAiClient();
+  let generatedReply = '';
+
+  if (ai) {
+    try {
+      const prompt = `
 Generate a professional, warm email reply for KisanSetu Customer Support.
 Language to use: ${isHi ? 'Hindi' : 'English'}.
 User inquiry: "${sanitizedBody}"
@@ -1094,19 +1224,19 @@ Help Email: ${SUPPORT_EMAIL}
 Helpline: ${SUPPORT_PHONE_NUMBER}
 Sign-off: KisanSetu Support Team (किसानसेतु सहायता टीम)
 `;
-        const aiRes = await ai.models.generateContent({
-          model: 'gemini-3.7-flash',
-          contents: prompt,
-        });
-        generatedReply = aiRes.text || '';
-      } catch {
-        // ignore
-      }
+      const aiRes = await ai.models.generateContent({
+        model: 'gemini-3.7-flash',
+        contents: prompt,
+      });
+      generatedReply = aiRes.text || '';
+    } catch {
+      // ignore
     }
+  }
 
-    if (!generatedReply) {
-      if (isHi) {
-        generatedReply = `नमस्ते ${emailData.fromName || ''},
+  if (!generatedReply) {
+    if (isHi) {
+      generatedReply = `नमस्ते ${emailData.fromName || ''},
 
 आपकी समस्या को समझने में मैं आपकी मदद करता हूँ। आपका समर्थन अनुरोध किसानसेतु सिस्टम में दर्ज कर लिया गया है।
 
@@ -1117,8 +1247,8 @@ Sign-off: KisanSetu Support Team (किसानसेतु सहायता
 
 सादर,
 किसानसेतु सहायता टीम (KisanSetu Support Desk)`;
-      } else {
-        generatedReply = `Hello ${emailData.fromName || ''},
+    } else {
+      generatedReply = `Hello ${emailData.fromName || ''},
 
 Thank you for reaching out to KisanSetu Support. We have received your inquiry and our agricultural support desk is reviewing your request.
 
@@ -1129,65 +1259,65 @@ We will get back to you shortly. For immediate assistance, feel free to contact 
 
 Warm regards,
 KisanSetu Support Team`;
-      }
     }
+  }
 
-    // Append AI reply to ticket history
-    addMessageToTicket(ticketId, {
-      sender: 'ai',
-      senderName: 'KisanSetu Email AI Desk',
-      text: generatedReply,
-    });
+  // Append AI reply to ticket history
+  addMessageToTicket(ticketId, {
+    sender: 'ai',
+    senderName: 'KisanSetu Email AI Desk',
+    text: generatedReply,
+  });
 
+  return {
+    ticketId,
+    isExistingTicket: isExisting,
+    replySubject: `Re: [${ticketId}] ${sanitizedSubject}`,
+    replyBody: generatedReply,
+  };
+}
+
+// ==========================================
+// PHONE HELPLINE / VOICE CALL PROCESSOR
+// ==========================================
+
+export async function processHelplineVoiceCall(callData: {
+  callerPhone?: string;
+  callerName?: string;
+  speechTranscript: string;
+  language?: 'hi' | 'en';
+}): Promise<{
+  spokenReply: string;
+  ticketId?: string;
+  actionTaken: string;
+  isEscalated: boolean;
+}> {
+  const sanitized = sanitizeInput(callData.speechTranscript);
+  const isHi = callData.language === 'hi' || /[\u0900-\u097F]/.test(sanitized);
+
+  // Security check
+  const sec = checkForSensitiveInformation(sanitized);
+  if (sec.isSensitive && sec.warningMsg) {
     return {
-      ticketId,
-      isExistingTicket: isExisting,
-      replySubject: `Re: [${ticketId}] ${sanitizedSubject}`,
-      replyBody: generatedReply,
+      spokenReply: sec.warningMsg,
+      actionTaken: 'Sensitive data warning issued',
+      isEscalated: false,
     };
   }
 
-  // ==========================================
-  // PHONE HELPLINE / VOICE CALL PROCESSOR
-  // ==========================================
+  // Diagnostic
+  const diag = await executeSupportDiagnostic(sanitized, {
+    activeLanguage: isHi ? 'hi' : 'en',
+    userName: callData.callerName,
+    userPhone: callData.callerPhone,
+  });
 
-  export async function processHelplineVoiceCall(callData: {
-    callerPhone?: string;
-    callerName?: string;
-    speechTranscript: string;
-    language?: 'hi' | 'en';
-  }): Promise<{
-    spokenReply: string;
-    ticketId?: string;
-    actionTaken: string;
-    isEscalated: boolean;
-  }> {
-    const sanitized = sanitizeInput(callData.speechTranscript);
-    const isHi = callData.language === 'hi' || /[\u0900-\u097F]/.test(sanitized);
+  const ai = getAiClient();
+  let spokenResponse = '';
 
-    // Security check
-    const sec = checkForSensitiveInformation(sanitized);
-    if (sec.isSensitive && sec.warningMsg) {
-      return {
-        spokenReply: sec.warningMsg,
-        actionTaken: 'Sensitive data warning issued',
-        isEscalated: false,
-      };
-    }
-
-    // Diagnostic
-    const diag = await executeSupportDiagnostic(sanitized, {
-      activeLanguage: isHi ? 'hi' : 'en',
-      userName: callData.callerName,
-      userPhone: callData.callerPhone,
-    });
-
-    const ai = getAiClient();
-    let spokenResponse = '';
-
-    if (ai) {
-      try {
-        const prompt = `
+  if (ai) {
+    try {
+      const prompt = `
 You are the voice of KisanSetu Support Hotline (${SUPPORT_PHONE_NUMBER}).
 Convert this support diagnostic into a short, natural spoken response (under 40 words) for a telephone caller.
 Language: ${isHi ? 'Hindi' : 'English'}
@@ -1195,42 +1325,42 @@ Caller query: "${sanitized}"
 Diagnostic: "${diag.explanation}"
 Do NOT use asterisks, markdown, or bullet points because this will be read out via text-to-speech.
 `;
-        const res = await ai.models.generateContent({
-          model: 'gemini-3.7-flash',
-          contents: prompt,
-        });
-        spokenResponse = (res.text || '').replace(/[*#_`]/g, '').trim();
-      } catch {
-        // fallback
-      }
+      const res = await ai.models.generateContent({
+        model: 'gemini-3.7-flash',
+        contents: prompt,
+      });
+      spokenResponse = (res.text || '').replace(/[*#_`]/g, '').trim();
+    } catch {
+      // fallback
     }
-
-    if (!spokenResponse) {
-      spokenResponse = isHi
-        ? 'नमस्ते, किसानसेतु सहायता में आपका स्वागत है। आपकी समस्या दर्ज कर ली गई है और हमारे कृषि सलाहकार जल्द संपर्क करेंगे।'
-        : 'Hello and welcome to KisanSetu Support. Your issue has been logged and our advisory team will assist you shortly.';
-    }
-
-    // Create escalated ticket for phone inquiries requiring follow-up
-    const ticket = createSupportTicket({
-      userId: callData.callerPhone || 'phone_caller',
-      userName: callData.callerName || 'Helpline Caller',
-      userRole: 'farmer',
-      userPhone: callData.callerPhone,
-      channel: 'PHONE',
-      category: 'GENERAL',
-      subject: `Helpline Call: ${sanitized.slice(0, 45)}`,
-      description: `Telephone conversation transcript: "${sanitized}"`,
-      conversationSummary: `Phone caller spoke with voice AI. Response provided: "${spokenResponse}".`,
-      priority: 'HIGH',
-      status: 'ESCALATED',
-      initialMessage: sanitized,
-    });
-
-    return {
-      spokenReply: spokenResponse,
-      ticketId: ticket.ticketId,
-      actionTaken: `Created Phone Ticket ${ticket.ticketId} and routed to Farmer Desk.`,
-      isEscalated: true,
-    };
   }
+
+  if (!spokenResponse) {
+    spokenResponse = isHi
+      ? 'नमस्ते, किसानसेतु सहायता में आपका स्वागत है। आपकी समस्या दर्ज कर ली गई है और हमारे कृषि सलाहकार जल्द संपर्क करेंगे।'
+      : 'Hello and welcome to KisanSetu Support. Your issue has been logged and our advisory team will assist you shortly.';
+  }
+
+  // Create escalated ticket for phone inquiries requiring follow-up
+  const ticket = createSupportTicket({
+    userId: callData.callerPhone || 'phone_caller',
+    userName: callData.callerName || 'Helpline Caller',
+    userRole: 'farmer',
+    userPhone: callData.callerPhone,
+    channel: 'PHONE',
+    category: 'GENERAL',
+    subject: `Helpline Call: ${sanitized.slice(0, 45)}`,
+    description: `Telephone conversation transcript: "${sanitized}"`,
+    conversationSummary: `Phone caller spoke with voice AI. Response provided: "${spokenResponse}".`,
+    priority: 'HIGH',
+    status: 'ESCALATED',
+    initialMessage: sanitized,
+  });
+
+  return {
+    spokenReply: spokenResponse,
+    ticketId: ticket.ticketId,
+    actionTaken: `Created Phone Ticket ${ticket.ticketId} and routed to Farmer Desk.`,
+    isEscalated: true,
+  };
+}
