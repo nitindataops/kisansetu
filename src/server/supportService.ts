@@ -793,6 +793,17 @@ export async function processAiSupportChat(params: {
       explanation: '',
       suggestedActions: [],
     };
+  // Fast path for verified live-data/support queries.
+  // The diagnostic tool already contains the grounded answer,
+  // so avoid making a second Gemini API call.
+  if (diagnostic.diagnosed && diagnostic.explanation) {
+    return {
+      replyText: diagnostic.explanation,
+      suggestedActions: diagnostic.suggestedActions,
+      needsResolutionConfirmation: true,
+      isAiFallback: false,
+    };
+  }
 
   // 6. Try calling Gemini AI for intelligent contextual synthesis
   const ai = getAiClient();
