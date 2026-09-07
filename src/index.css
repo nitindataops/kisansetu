@@ -1,0 +1,171 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  h1, h2, h3, .font-serif-heading {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+  }
+}
+
+/* Custom Agricultural Breeze & Sway Keyframes */
+@keyframes sway-slow {
+  0%, 100% {
+    transform: rotate(0deg) translate(0, 0);
+  }
+  50% {
+    transform: rotate(3.5deg) translate(2px, -1px);
+  }
+}
+
+@keyframes sway-medium {
+  0%, 100% {
+    transform: rotate(0deg) translate(0, 0);
+  }
+  50% {
+    transform: rotate(-4.5deg) translate(-3px, -1px);
+  }
+}
+
+@keyframes sway-fast {
+  0%, 100% {
+    transform: rotate(0deg) translate(0, 0);
+  }
+  50% {
+    transform: rotate(5.5deg) translate(3px, -2px);
+  }
+}
+
+@keyframes float-leaf {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.65;
+  }
+  85% {
+    opacity: 0.65;
+  }
+  100% {
+    transform: translate(80px, -110px) rotate(45deg);
+    opacity: 0;
+  }
+}
+
+@keyframes float-cloud {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(25px);
+  }
+}
+
+@keyframes flutter {
+  0%, 100% {
+    transform: translate(0, 0) rotate(0deg) scale(1);
+  }
+  25% {
+    transform: translate(8px, -12px) rotate(6deg) scale(0.98);
+  }
+  50% {
+    transform: translate(18px, -6px) rotate(-4deg) scale(1.02);
+  }
+  75% {
+    transform: translate(10px, 8px) rotate(3deg) scale(1);
+  }
+}
+
+.animate-sway-slow {
+  animation: sway-slow 6s ease-in-out infinite;
+  transform-origin: bottom center;
+}
+
+.animate-sway-medium {
+  animation: sway-medium 4.8s ease-in-out infinite;
+  transform-origin: bottom center;
+}
+
+.animate-sway-fast {
+  animation: sway-fast 3.6s ease-in-out infinite;
+  transform-origin: bottom center;
+}
+
+.animate-flutter {
+  animation: flutter 9s ease-in-out infinite;
+}
+
+.animate-float-cloud {
+  animation: float-cloud 24s ease-in-out infinite;
+}
+
+/* Subtle Natural Farm Breathing & Sunlight Cycle */
+@keyframes farm-breathe {
+  0%, 100% {
+    transform: scale(1.02) translate3d(0, 0, 0);
+  }
+  50% {
+    transform: scale(1.04) translate3d(-4px, -3px, 0);
+  }
+}
+
+@keyframes sunlight-shift {
+  0%, 100% {
+    opacity: 0.22;
+  }
+  50% {
+    opacity: 0.38;
+  }
+}
+
+.animate-farm-breathe {
+  animation: farm-breathe 28s ease-in-out infinite alternate;
+  transform-origin: center center;
+}
+
+.animate-sunlight-shift {
+  animation: sunlight-shift 18s ease-in-out infinite alternate;
+}
+
+/* Mobile-first touch & safe area optimizations */
+html, body {
+  overflow-x: hidden;
+  width: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.safe-area-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Touch-friendly scroll containers */
+.touch-scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.touch-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+/* Reduced motion preference support */
+@media (prefers-reduced-motion: reduce) {
+  .animate-sway-slow,
+  .animate-sway-medium,
+  .animate-sway-fast,
+  .animate-flutter,
+  .animate-float-cloud,
+  .animate-farm-breathe,
+  .animate-sunlight-shift {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+

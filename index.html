@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      // Filter benign Vite dev-server websocket connection notices in preview iframe
+      (function() {
+        var isViteNotice = function(val) {
+          if (!val) return false;
+          var str = '';
+          if (typeof val === 'string') {
+            str = val;
+          } else if (val instanceof Error) {
+            str = (val.message || '') + ' ' + (val.stack || '');
+          } else {
+            try { str = JSON.stringify(val) || String(val); } catch (e) { str = String(val); }
+          }
+          return (
+            str.indexOf('[vite]') !== -1 ||
+            (str.indexOf('WebSocket') !== -1 && str.indexOf('vite') !== -1) ||
+            str.indexOf('vite-hmr') !== -1
+          );
+        };
+
+        var origConsoleError = console.error;
+        console.error = function() {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isViteNotice(arguments[i])) return;
+          }
+          return origConsoleError.apply(console, arguments);
+        };
+
+        var origConsoleWarn = console.warn;
+        console.warn = function() {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isViteNotice(arguments[i])) return;
+          }
+          return origConsoleWarn.apply(console, arguments);
+        };
+
+        var origConsoleLog = console.log;
+        console.log = function() {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isViteNotice(arguments[i])) return;
+          }
+          return origConsoleLog.apply(console, arguments);
+        };
+
+        var origConsoleInfo = console.info;
+        console.info = function() {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isViteNotice(arguments[i])) return;
+          }
+          return origConsoleInfo.apply(console, arguments);
+        };
+
+        var origConsoleDebug = console.debug;
+        console.debug = function() {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isViteNotice(arguments[i])) return;
+          }
+          return origConsoleDebug.apply(console, arguments);
+        };
+
+        // Suppress Vite HMR client websocket attempts in container preview
+        if (typeof window !== 'undefined' && window.WebSocket) {
+          var OrigWebSocket = window.WebSocket;
+          window.WebSocket = function(url, protocols) {
+            var urlStr = String(url || '');
+            var protoStr = String(protocols || '');
+            if (urlStr.indexOf('token=') !== -1 || protoStr.indexOf('vite') !== -1) {
+              return {
+                readyState: 1,
+                send: function() {},
+                close: function() {},
+                addEventListener: function() {},
+                removeEventListener: function() {},
+                dispatchEvent: function() { return true; },
+                onopen: null,
+                onclose: null,
+                onmessage: null,
+                onerror: null,
+              };
+            }
+            return new OrigWebSocket(url, protocols);
+          };
+          window.WebSocket.prototype = OrigWebSocket.prototype;
+          window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+          window.WebSocket.OPEN = OrigWebSocket.OPEN;
+          window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+          window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+        }
+
+        window.addEventListener('error', function(event) {
+          if (event && (isViteNotice(event.message) || isViteNotice(event.error))) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return false;
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function(event) {
+          if (event && (isViteNotice(event.reason) || (event.reason && isViteNotice(event.reason.message)))) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return false;
+          }
+        }, true);
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>KisanSetu</title>
+    <meta name="description" content="KisanSetu connects Indian farmers with trusted buyers, fair prices and better opportunities for their crops." />
+    <meta property="og:title" content="KisanSetu" />
+    <meta property="og:description" content="KisanSetu connects Indian farmers with trusted buyers, fair prices and better opportunities for their crops." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    
+    <!-- PWA & Mobile Web App Meta -->
+    <meta name="theme-color" content="#245C3A" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="KisanSetu" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-[#FBFAF4] text-[#26332B] antialiased selection:bg-[#D6A63A]/25 selection:text-[#245C3A]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
